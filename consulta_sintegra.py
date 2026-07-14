@@ -3,6 +3,7 @@ import os
 import random
 import re
 import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -33,6 +34,17 @@ def localizar_chromium_sistema() -> str | None:
             return caminho
 
     return None
+
+
+def instalar_chromium_playwright(on_status=None) -> None:
+    if on_status:
+        on_status("Chromium nao encontrado. Instalando navegador do Playwright...")
+
+    subprocess.run(
+        [sys.executable, "-m", "playwright", "install", "chromium"],
+        check=True,
+        timeout=180,
+    )
 
 
 def limpar_cnpj(cnpj: str) -> str:
@@ -112,7 +124,16 @@ class ConsultaSintegraBA:
                 self._status(f"Usando Chromium do sistema: {chromium_sistema}")
                 launch_kwargs["executable_path"] = chromium_sistema
 
-        self._browser = self._playwright.chromium.launch(**launch_kwargs)
+        try:
+            self._browser = self._playwright.chromium.launch(**launch_kwargs)
+        except Exception:
+            if sys.platform == "win32" or "executable_path" in launch_kwargs:
+                raise
+            instalar_chromium_playwright(self.on_status)
+            self._browser = self._playwright.chromium.launch(
+                headless=self.headless,
+                args=["--no-sandbox", "--disable-dev-shm-usage"],
+            )
         self._page = self._browser.new_page()
         self._page.set_default_timeout(self.timeout_ms)
         self._abrir_pagina("Abrindo portal da Sefaz-BA")
