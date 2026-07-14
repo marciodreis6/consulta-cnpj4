@@ -375,27 +375,36 @@ if uploaded_file:
 
         status.text("Iniciando navegador de consulta...")
 
-        with ConsultaSintegraBA(
-            delay_min=delay_min,
-            delay_max=delay_max,
-            timeout_ms=20000,
-            on_status=mostrar_status,
-        ) as consulta:
-            for indice, cnpj in enumerate(cnpjs_unicos, start=1):
-                status.text(f"Consultando {indice}/{len(cnpjs_unicos)}: {cnpj}")
-                resultado = consulta.consultar(cnpj, tentativas=tentativas)
-                resultados_por_cnpj[cnpj] = resultado
+        try:
+            with ConsultaSintegraBA(
+                delay_min=delay_min,
+                delay_max=delay_max,
+                timeout_ms=20000,
+                on_status=mostrar_status,
+            ) as consulta:
+                for indice, cnpj in enumerate(cnpjs_unicos, start=1):
+                    status.text(f"Consultando {indice}/{len(cnpjs_unicos)}: {cnpj}")
+                    resultado = consulta.consultar(cnpj, tentativas=tentativas)
+                    resultados_por_cnpj[cnpj] = resultado
 
-                progresso = indice / len(cnpjs_unicos)
-                tempo_decorrido = time.time() - inicio
-                tempo_medio = tempo_decorrido / indice
-                tempo_restante = int((len(cnpjs_unicos) - indice) * tempo_medio)
+                    progresso = indice / len(cnpjs_unicos)
+                    tempo_decorrido = time.time() - inicio
+                    tempo_medio = tempo_decorrido / indice
+                    tempo_restante = int((len(cnpjs_unicos) - indice) * tempo_medio)
 
-                barra.progress(progresso)
-                status.text(
-                    f"{indice}/{len(cnpjs_unicos)} consultados "
-                    f"({int(progresso * 100)}%) | ~{tempo_restante}s restantes"
-                )
+                    barra.progress(progresso)
+                    status.text(
+                        f"{indice}/{len(cnpjs_unicos)} consultados "
+                        f"({int(progresso * 100)}%) | ~{tempo_restante}s restantes"
+                    )
+        except Exception as erro:
+            detalhe.empty()
+            st.error(
+                "Nao foi possivel abrir o navegador Chromium no ambiente do deploy. "
+                "Confira se `packages.txt` e `runtime.txt` foram enviados junto com o app."
+            )
+            st.code(str(erro), language="text")
+            st.stop()
 
         detalhe.empty()
 

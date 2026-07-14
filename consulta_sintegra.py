@@ -1,6 +1,8 @@
 import asyncio
+import os
 import random
 import re
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -11,6 +13,26 @@ from playwright.sync_api import sync_playwright
 
 
 URL_CONSULTA_BA = "https://portal.sefaz.ba.gov.br/scripts/cadastro/cadastroBa/consultaBa.asp"
+
+
+def localizar_chromium_sistema() -> str | None:
+    caminhos = [
+        os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE"),
+        shutil.which("chromium"),
+        shutil.which("chromium-browser"),
+        shutil.which("google-chrome"),
+        shutil.which("google-chrome-stable"),
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+    ]
+
+    for caminho in caminhos:
+        if caminho and os.path.exists(caminho):
+            return caminho
+
+    return None
 
 
 def limpar_cnpj(cnpj: str) -> str:
@@ -78,10 +100,19 @@ class ConsultaSintegraBA:
 
         self._playwright = sync_playwright().start()
         self._status("Abrindo Chromium")
-        self._browser = self._playwright.chromium.launch(
-            headless=self.headless,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
-        )
+
+        launch_kwargs = {
+            "headless": self.headless,
+            "args": ["--no-sandbox", "--disable-dev-shm-usage"],
+        }
+
+        if sys.platform != "win32":
+            chromium_sistema = localizar_chromium_sistema()
+            if chromium_sistema:
+                self._status(f"Usando Chromium do sistema: {chromium_sistema}")
+                launch_kwargs["executable_path"] = chromium_sistema
+
+        self._browser = self._playwright.chromium.launch(**launch_kwargs)
         self._page = self._browser.new_page()
         self._page.set_default_timeout(self.timeout_ms)
         self._abrir_pagina("Abrindo portal da Sefaz-BA")
