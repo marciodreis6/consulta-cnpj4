@@ -18,6 +18,14 @@ from playwright.sync_api import sync_playwright
 URL_CONSULTA_BA = "https://portal.sefaz.ba.gov.br/scripts/cadastro/cadastroBa/consultaBa.asp"
 
 
+def executando_no_streamlit_cloud() -> bool:
+    return (
+        os.path.exists("/mount/src")
+        or os.path.exists("/home/appuser")
+        or bool(os.getenv("STREAMLIT_SHARING_MODE"))
+    )
+
+
 def localizar_chromium_sistema() -> str | None:
     caminhos = [
         os.getenv("PLAYWRIGHT_CHROMIUM_EXECUTABLE"),
@@ -131,12 +139,18 @@ class ConsultaSintegraBA:
         timeout_ms: int = 30000,
         headless: bool = True,
         on_status=None,
+        usar_fallback_navegador: bool | None = None,
     ):
         self.delay_min = delay_min
         self.delay_max = delay_max
         self.timeout_ms = timeout_ms
         self.headless = headless
         self.on_status = on_status
+        self.usar_fallback_navegador = (
+            not executando_no_streamlit_cloud()
+            if usar_fallback_navegador is None
+            else usar_fallback_navegador
+        )
         self._playwright = None
         self._browser = None
         self._page = None
@@ -146,14 +160,26 @@ class ConsultaSintegraBA:
         return self
 
     def __exit__(self, exc_type, exc, traceback):
-        if self._browser:
-            self._browser.close()
-        if self._playwright:
-            self._playwright.stop()
+        self._encerrar_navegador()
 
     def _status(self, mensagem: str):
         if self.on_status:
             self.on_status(mensagem)
+
+    def _encerrar_navegador(self):
+        try:
+            if self._browser:
+                self._browser.close()
+        except Exception:
+            pass
+        try:
+            if self._playwright:
+                self._playwright.stop()
+        except Exception:
+            pass
+        self._page = None
+        self._browser = None
+        self._playwright = None
 
     def _iniciar_navegador(self):
         if self._browser and self._page:
@@ -229,6 +255,14 @@ class ConsultaSintegraBA:
             except Exception as erro:
                 ultimo_erro = f"HTTP: {erro}"
 
+            if not self.usar_fallback_navegador:
+                self._status(
+                    f"CNPJ {cnpj_limpo}: resposta nao confirmada; marcado para verificar"
+                )
+                if tentativa < tentativas:
+                    time.sleep(random.uniform(self.delay_min, self.delay_max))
+                continue
+
             try:
                 self._status(f"Fallback navegador para CNPJ {cnpj_limpo} - tentativa {tentativa}")
                 texto = self._consultar_uma_vez(cnpj_limpo)
@@ -246,12 +280,10 @@ class ConsultaSintegraBA:
                     )
             except PlaywrightTimeoutError as erro:
                 ultimo_erro = f"TIMEOUT: {erro}"
-                if self._page:
-                    self._abrir_pagina("Reabrindo portal apos timeout")
+                self._encerrar_navegador()
             except Exception as erro:
                 ultimo_erro = f"ERRO: {erro}"
-                if self._page:
-                    self._abrir_pagina("Reabrindo portal apos erro")
+                self._encerrar_navegador()
 
             time.sleep(random.uniform(self.delay_min, self.delay_max))
 
