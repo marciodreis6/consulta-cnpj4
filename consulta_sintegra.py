@@ -6,9 +6,11 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from datetime import datetime
 from typing import Iterable
 
+import requests
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from playwright.sync_api import sync_playwright
 
@@ -47,6 +49,13 @@ def instalar_chromium_playwright(on_status=None) -> None:
     )
 
 
+def normalizar_texto(texto: str) -> str:
+    texto = texto or ""
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(char for char in texto if not unicodedata.combining(char))
+    return re.sub(r"\s+", " ", texto.upper())
+
+
 def limpar_cnpj(cnpj: str) -> str:
     return re.sub(r"\D", "", str(cnpj or "")).zfill(14)
 
@@ -65,10 +74,10 @@ def classificar_status(status: str) -> str:
 
 
 def extrair_situacao(texto: str) -> str:
-    texto = re.sub(r"\s+", " ", (texto or "").upper())
+    texto = normalizar_texto(texto)
     padroes = [
-        r"SITUA[ÇC][ÃA]O CADASTRAL VIGENTE\s*:?\s*([A-ZÇÃÕÁÉÍÓÚ ]+)",
-        r"SITUA..O CADASTRAL VIGENTE\s*:?\s*([A-ZÇÃÕÁÉÍÓÚ ]+)",
+        r"SITUACAO CADASTRAL VIGENTE\s*:?\s*([A-Z ]+)",
+        r"SITUA..O CADASTRAL VIGENTE\s*:?\s*([A-Z ]+)",
     ]
 
     for padrao in padroes:
@@ -80,10 +89,38 @@ def extrair_situacao(texto: str) -> str:
                     return status
             return valor.split(" ")[0]
 
-    if "NÃO ENCONTRADO" in texto or "NAO ENCONTRADO" in texto:
+    if "NAO ENCONTRADO" in texto or "NAO CADASTRADO" in texto:
         return "NAO_ENCONTRADO"
 
     return "VERIFICAR"
+
+
+def consultar_por_http(cnpj: str, timeout_segundos: int = 20) -> str:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36"
+        ),
+        "Referer": URL_CONSULTA_BA,
+        "Origin": "https://portal.sefaz.ba.gov.br",
+    }
+    dados = {
+        "sefp": "1",
+        "estado": "BA",
+        "CGC": cnpj,
+        "B1": "CNPJ  ->",
+    }
+
+    sessao = requests.Session()
+    sessao.get(URL_CONSULTA_BA, headers=headers, timeout=timeout_segundos)
+    resposta = sessao.post(
+        URL_CONSULTA_BA,
+        data=dados,
+        headers=headers,
+        timeout=timeout_segundos,
+    )
+    resposta.encoding = resposta.apparent_encoding or "latin-1"
+    return resposta.text
 
 
 class ConsultaSintegraBA:
@@ -105,6 +142,23 @@ class ConsultaSintegraBA:
         self._page = None
 
     def __enter__(self):
+        self._status("Consulta preparada")
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        if self._browser:
+            self._browser.close()
+        if self._playwright:
+            self._playwright.stop()
+
+    def _status(self, mensagem: str):
+        if self.on_status:
+            self.on_status(mensagem)
+
+    def _iniciar_navegador(self):
+        if self._browser and self._page:
+            return
+
         self._status("Iniciando Playwright")
         if sys.platform == "win32":
             asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -134,20 +188,10 @@ class ConsultaSintegraBA:
                 headless=self.headless,
                 args=["--no-sandbox", "--disable-dev-shm-usage"],
             )
+
         self._page = self._browser.new_page()
         self._page.set_default_timeout(self.timeout_ms)
         self._abrir_pagina("Abrindo portal da Sefaz-BA")
-        return self
-
-    def __exit__(self, exc_type, exc, traceback):
-        if self._browser:
-            self._browser.close()
-        if self._playwright:
-            self._playwright.stop()
-
-    def _status(self, mensagem: str):
-        if self.on_status:
-            self.on_status(mensagem)
 
     def _abrir_pagina(self, mensagem: str = "Carregando portal da Sefaz-BA"):
         self._status(mensagem)
@@ -165,6 +209,28 @@ class ConsultaSintegraBA:
         for tentativa in range(1, tentativas + 1):
             try:
                 self._status(f"Consultando CNPJ {cnpj_limpo} - tentativa {tentativa}")
+                texto = consultar_por_http(
+                    cnpj_limpo,
+                    timeout_segundos=max(10, self.timeout_ms // 1000),
+                )
+                situacao = extrair_situacao(texto)
+                status_final = classificar_status(situacao)
+
+                if situacao != "VERIFICAR":
+                    return self._resposta(
+                        cnpj_limpo,
+                        situacao,
+                        status_final,
+                        consultado_em,
+                        tentativa=tentativa,
+                    )
+
+                ultimo_erro = "HTTP: status nao identificado na pagina"
+            except Exception as erro:
+                ultimo_erro = f"HTTP: {erro}"
+
+            try:
+                self._status(f"Fallback navegador para CNPJ {cnpj_limpo} - tentativa {tentativa}")
                 texto = self._consultar_uma_vez(cnpj_limpo)
                 situacao = extrair_situacao(texto)
                 status_final = classificar_status(situacao)
@@ -176,13 +242,16 @@ class ConsultaSintegraBA:
                         status_final,
                         consultado_em,
                         tentativa=tentativa,
+                        erro=ultimo_erro,
                     )
             except PlaywrightTimeoutError as erro:
                 ultimo_erro = f"TIMEOUT: {erro}"
-                self._abrir_pagina("Reabrindo portal apos timeout")
+                if self._page:
+                    self._abrir_pagina("Reabrindo portal apos timeout")
             except Exception as erro:
                 ultimo_erro = f"ERRO: {erro}"
-                self._abrir_pagina("Reabrindo portal apos erro")
+                if self._page:
+                    self._abrir_pagina("Reabrindo portal apos erro")
 
             time.sleep(random.uniform(self.delay_min, self.delay_max))
 
@@ -208,6 +277,7 @@ class ConsultaSintegraBA:
         return resultados
 
     def _consultar_uma_vez(self, cnpj: str) -> str:
+        self._iniciar_navegador()
         self._abrir_pagina("Preparando formulario de consulta")
         self._page.fill('input[name="CGC"]', cnpj)
         time.sleep(random.uniform(self.delay_min, self.delay_max))
